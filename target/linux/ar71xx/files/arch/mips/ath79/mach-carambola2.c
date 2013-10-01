@@ -7,7 +7,6 @@
  *  under the terms of the GNU General Public License version 2 as published
  *  by the Free Software Foundation.
  */
-
 #include <asm/mach-ath79/ath79.h>
 #include <asm/mach-ath79/ar71xx_regs.h>
 #include "common.h"
@@ -21,6 +20,9 @@
 #include "machtypes.h"
 #include "linux/i2c-gpio.h"
 #include "linux/platform_device.h"
+#include <linux/gpio.h>
+#include <linux/can/platform/mcp251x.h>
+#include <linux/irq.h>
 
 #define CARAMBOLA2_GPIO_LED_WLAN		0
 #define CARAMBOLA2_GPIO_LED_ETH0		14
@@ -36,6 +38,41 @@
 #define CARAMBOLA2_MAC1_OFFSET			0x0006
 #define CARAMBOLA2_CALDATA_OFFSET		0x1000
 #define CARAMBOLA2_WMAC_MAC_OFFSET		0x1002
+
+#define MCP2515_CAN_CS_GPIO_PIN			22
+#define MCP2515_CAN_INT_GPIO_PIN		23
+
+static struct ath79_spi_controller_data ath79_spi_mcp251x_cdata =
+{
+	.cs_type = ATH79_SPI_CS_TYPE_GPIO,
+	.cs_line = MCP2515_CAN_CS_GPIO_PIN,
+    .is_flash = false,
+};
+
+static struct mcp251x_platform_data mcp251x_info = {
+   .oscillator_frequency   = 20000000,
+   .board_specific_setup   = NULL,
+//   .irq_flags              = IRQF_TRIGGER_FALLING,
+   .power_enable           = NULL,
+   .transceiver_enable     = NULL,
+};
+
+static struct spi_board_info carambola2_spi_info[] = {
+	{
+		.bus_num	= 0,
+		.chip_select	= 2,
+		.max_speed_hz	= 10000000,
+		.modalias	= "mcp2515",
+        .platform_data = &mcp251x_info,
+		.controller_data = &ath79_spi_mcp251x_cdata,
+	},
+};
+
+static void __init carambola2_mcp251x_init(void) {
+    carambola2_spi_info[0].irq = gpio_to_irq(MCP2515_CAN_INT_GPIO_PIN);
+    printk(KERN_INFO " CARAMBOLA2 mcp251x_init:  got IRQ %d for MCP2515\n", carambola2_spi_info[0].irq);
+    return;
+};
 
 static struct gpio_led carambola2_leds_gpio[] __initdata = {
 	{
@@ -122,6 +159,10 @@ static void __init carambola2_setup(void)
 				AR724X_GPIO_FUNC_ETH_SWITCH_LED4_EN);
 
     platform_add_devices(carambola2_devices, ARRAY_SIZE(carambola2_devices));
+
+	carambola2_mcp251x_init();
+    spi_register_board_info(carambola2_spi_info,
+                            ARRAY_SIZE(carambola2_spi_info));
 
 	ath79_register_leds_gpio(-1, ARRAY_SIZE(carambola2_leds_gpio),
 				 carambola2_leds_gpio);
