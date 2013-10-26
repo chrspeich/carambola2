@@ -23,6 +23,7 @@
 #include <linux/gpio.h>
 #include <linux/can/platform/mcp251x.h>
 #include <linux/irq.h>
+#include <linux/interrupt.h>
 
 #define CARAMBOLA2_GPIO_LED_WLAN		0
 #define CARAMBOLA2_GPIO_LED_ETH0		14
@@ -49,10 +50,24 @@ static struct ath79_spi_controller_data ath79_spi_mcp251x_cdata =
     .is_flash = false,
 };
 
+static int mcp251x_setup(struct spi_device *spi)
+{
+	if (gpio_request(MCP2515_CAN_INT_GPIO_PIN, "MCP2515") < 0)
+		return -1;
+
+
+	if (gpio_direction_input(MCP2515_CAN_INT_GPIO_PIN) < 0)
+		return -1;
+
+	return 0;
+}
+
 static struct mcp251x_platform_data mcp251x_info = {
    .oscillator_frequency   = 20000000,
    .board_specific_setup   = NULL,
-//   .irq_flags              = IRQF_TRIGGER_FALLING,
+   .irq_flags              = IRQF_TRIGGER_FALLING|IRQF_ONESHOT,
+   .board_specific_setup   = &mcp251x_setup,
+   // .model = CAN_MCP251X_MCP2515,
    .power_enable           = NULL,
    .transceiver_enable     = NULL,
 };
@@ -60,7 +75,7 @@ static struct mcp251x_platform_data mcp251x_info = {
 static struct spi_board_info carambola2_spi_info[] = {
 	{
 		.bus_num	= 0,
-		.chip_select	= 2,
+		.chip_select	= 1,
 		.max_speed_hz	= 10000000,
 		.modalias	= "mcp2515",
         .platform_data = &mcp251x_info,

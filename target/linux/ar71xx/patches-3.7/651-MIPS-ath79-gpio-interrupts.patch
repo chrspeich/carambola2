@@ -1,0 +1,244 @@
+--- a/arch/mips/ath79/gpio.c
++++ b/arch/mips/ath79/gpio.c
+@@ -20,6 +20,7 @@
+ #include <linux/io.h>
+ #include <linux/ioport.h>
+ #include <linux/gpio.h>
++#include <linux/irq.h>
+ 
+ #include <asm/mach-ath79/ar71xx_regs.h>
+ #include <asm/mach-ath79/ath79.h>
+@@ -198,6 +199,185 @@ void ath79_gpio_function_setup(u32 set,
+ 	spin_unlock_irqrestore(&ath79_gpio_lock, flags);
+ }
+ 
++static int count;
++
++static void ath79_gpio_irq_handler(unsigned int irq, struct irq_desc *desc)
++{
++	void __iomem *base = ath79_gpio_base;
++	u32 pending;
++
++	pending = __raw_readl(base + AR71XX_GPIO_REG_INT_PENDING) &
++		  __raw_readl(base + AR71XX_GPIO_REG_INT_MODE) &
++		  __raw_readl(base + AR71XX_GPIO_REG_INT_ENABLE);
++    
++
++	if (!pending) {
++        printk(KERN_INFO " GPIO pending %x\n", __raw_readl(base + AR71XX_GPIO_REG_INT_PENDING));
++        printk(KERN_INFO " GPIO mode %x\n", __raw_readl(base + AR71XX_GPIO_REG_INT_MODE));
++        printk(KERN_INFO " GPIO enable %x\n", __raw_readl(base + AR71XX_GPIO_REG_INT_ENABLE));
++		spurious_interrupt();
++        
++        if (count > 10)
++            panic("TO HIGH");
++        
++        count++;
++		return;
++	}
++
++	while (pending) {
++		int bit = __ffs(pending);
++
++        printk(KERN_INFO " GPIO GOT IRQ %d\n", bit);
++		generic_handle_irq(ATH79_GPIO_IRQ(bit));
++		pending &= ~BIT(bit);
++	}
++    
++    printk(KERN_INFO " GPIO pending %x\n", __raw_readl(base + AR71XX_GPIO_REG_INT_PENDING));
++    printk(KERN_INFO " GPIO mode %x\n", __raw_readl(base + AR71XX_GPIO_REG_INT_MODE));
++    printk(KERN_INFO " GPIO enable %x\n", __raw_readl(base + AR71XX_GPIO_REG_INT_ENABLE));
++    
++    /* Start handling the irq */
++    desc->irq_data.chip->irq_ack(&desc->irq_data);
++}
++
++static void ath79_gpio_irq_unmask(struct irq_data *d)
++{
++	unsigned int irq = d->irq - ATH79_GPIO_IRQ_BASE;
++	void __iomem *base = ath79_gpio_base;
++	u32 t;
++
++	printk(KERN_INFO " GPIO SET IRQ UNMASK %d\n", irq);
++
++	t = __raw_readl(base + AR71XX_GPIO_REG_INT_ENABLE);
++	__raw_writel(t | (1 << irq), base + AR71XX_GPIO_REG_INT_ENABLE);
++
++	/* flush write */
++	__raw_readl(base + AR71XX_GPIO_REG_INT_ENABLE);
++}
++
++static void ath79_gpio_irq_mask(struct irq_data *d)
++{
++	unsigned int irq = d->irq - ATH79_GPIO_IRQ_BASE;
++	void __iomem *base = ath79_gpio_base;
++	u32 t;
++
++	printk(KERN_INFO " GPIO SET IRQ MASK %d\n", irq);
++
++	t = __raw_readl(base + AR71XX_GPIO_REG_INT_ENABLE);
++	__raw_writel(t & ~(1 << irq), base + AR71XX_GPIO_REG_INT_ENABLE);
++
++	/* flush write */
++	__raw_readl(base + AR71XX_GPIO_REG_INT_ENABLE);
++}
++
++static void ath79_gpio_irq_ack(struct irq_data *d)
++{
++	unsigned int irq = d->irq - ATH79_GPIO_IRQ_BASE;
++	void __iomem *base = ath79_gpio_base;
++	u32 t;
++
++	printk(KERN_INFO " GPIO SET IRQ ACK %d\n", irq);
++
++	t = __raw_readl(base + AR71XX_GPIO_REG_INT_PENDING);
++	__raw_writel(t & ~(1 << irq), base + AR71XX_GPIO_REG_INT_PENDING);
++
++	/* flush write */
++	__raw_readl(base + AR71XX_GPIO_REG_INT_PENDING);
++}
++
++static int ath79_gpio_irq_set_type(struct irq_data *d, unsigned type)
++{
++	unsigned int irq = d->irq - ATH79_GPIO_IRQ_BASE;
++	void __iomem *base = ath79_gpio_base;
++	u32 t;
++
++	printk(KERN_INFO " GPIO SET IRQ TYPE %d: %d\n", irq, type);
++
++    /*
++     The AR9331 docu states that 1 signifies edge triggered
++     and 0 leveltriggered, however testing resulted in the oppisite.
++     */
++	t = __raw_readl(base + AR71XX_GPIO_REG_INT_TYPE);
++	if (type & IRQ_TYPE_EDGE_BOTH)
++		t &= ~(1 << irq);
++	else
++		t |= (1 << irq);
++	__raw_writel(t, base + AR71XX_GPIO_REG_INT_TYPE);
++
++	t = __raw_readl(base + AR71XX_GPIO_REG_INT_POLARITY);
++	if (type & (IRQ_TYPE_LEVEL_HIGH|IRQ_TYPE_EDGE_RISING))
++		t |= (1 << irq);
++	else
++		t &= ~(1 << irq);
++	__raw_writel(t, base + AR71XX_GPIO_REG_INT_POLARITY);
++
++    irq_set_handler(d->irq, (type & IRQ_TYPE_EDGE_BOTH) ? handle_edge_irq : handle_level_irq);
++    
++	/* flush write */
++	printk(KERN_INFO " GPIO IRQ TYPE %x", __raw_readl(base + AR71XX_GPIO_REG_INT_TYPE));
++	printk(KERN_INFO " GPIO IRQ POLARITY %x", __raw_readl(base + AR71XX_GPIO_REG_INT_POLARITY));
++
++	return 0;
++}
++
++static void ath79_gpio_irq_enable(struct irq_data *d)
++{
++	unsigned int irq = d->irq - ATH79_GPIO_IRQ_BASE;
++	void __iomem *base = ath79_gpio_base;
++	u32 t;
++
++	printk(KERN_INFO " GPIO SET IRQ ENABLE %d\n", irq);
++
++	t = __raw_readl(base + AR71XX_GPIO_REG_INT_MODE);
++	__raw_writel(t | (1 << irq), base + AR71XX_GPIO_REG_INT_MODE);
++
++	/* flush write */
++	__raw_readl(base + AR71XX_GPIO_REG_INT_MODE);
++    
++    ath79_gpio_irq_unmask(d);
++}
++
++static void ath79_gpio_irq_disable(struct irq_data *d)
++{
++	unsigned int irq = d->irq - ATH79_GPIO_IRQ_BASE;
++	void __iomem *base = ath79_gpio_base;
++	u32 t;
++
++	printk(KERN_INFO " GPIO SET IRQ DISABLE %d\n", irq);
++
++	t = __raw_readl(base + AR71XX_GPIO_REG_INT_MODE);
++	__raw_writel(t & ~(1 << irq), base + AR71XX_GPIO_REG_INT_MODE);
++
++	/* flush write */
++	__raw_readl(base + AR71XX_GPIO_REG_INT_MODE);
++}
++
++static struct irq_chip ath79_misc_irq_chip = {
++	.name		= "GPIO",
++	.irq_unmask	= ath79_gpio_irq_unmask,
++	.irq_mask	= ath79_gpio_irq_mask,
++	.irq_ack	= ath79_gpio_irq_ack,
++	.irq_set_type   = ath79_gpio_irq_set_type,
++	.irq_enable = ath79_gpio_irq_enable,
++	.irq_disable = ath79_gpio_irq_disable,
++};
++
++void __init ath79_gpio_irq_init(void)
++{
++	void __iomem *base = ath79_gpio_base;
++	u32 irq;
++    count=0;
++	__raw_writel(0, base + AR71XX_GPIO_REG_INT_ENABLE);
++	__raw_writel(0, base + AR71XX_GPIO_REG_INT_MODE);
++	__raw_writel(0, base + AR71XX_GPIO_REG_INT_PENDING);
++
++	for (irq = ATH79_GPIO_IRQ_BASE; irq < (ATH79_GPIO_IRQ_BASE + ATH79_GPIO_IRQ_COUNT); irq++) {
++		irq_set_chip(irq, &ath79_misc_irq_chip);
++	}
++
++	irq_set_chained_handler(ATH79_MISC_IRQ_GPIO, ath79_gpio_irq_handler);
++}
++
+ void __init ath79_gpio_output_select(unsigned gpio, u8 val)
+ {
+ 	void __iomem *base = ath79_gpio_base;
+@@ -257,6 +437,8 @@ void __init ath79_gpio_init(void)
+ 	err = gpiochip_add(&ath79_gpio_chip);
+ 	if (err)
+ 		panic("cannot add AR71xx GPIO chip, error=%d", err);
++
++	ath79_gpio_irq_init();
+ }
+ 
+ int gpio_get_value(unsigned gpio)
+@@ -279,14 +461,12 @@ EXPORT_SYMBOL(gpio_set_value);
+ 
+ int gpio_to_irq(unsigned gpio)
+ {
+-	/* FIXME */
+-	return -EINVAL;
++	return ATH79_GPIO_IRQ(gpio);
+ }
+ EXPORT_SYMBOL(gpio_to_irq);
+ 
+ int irq_to_gpio(unsigned irq)
+ {
+-	/* FIXME */
+-	return -EINVAL;
++	return irq - ATH79_GPIO_IRQ_BASE;
+ }
+ EXPORT_SYMBOL(irq_to_gpio);
+--- a/arch/mips/include/asm/mach-ath79/irq.h
++++ b/arch/mips/include/asm/mach-ath79/irq.h
+@@ -10,7 +10,7 @@
+ #define __ASM_MACH_ATH79_IRQ_H
+ 
+ #define MIPS_CPU_IRQ_BASE	0
+-#define NR_IRQS			51
++#define NR_IRQS			81
+ 
+ #define ATH79_MISC_IRQ_BASE	8
+ #define ATH79_MISC_IRQ_COUNT	32
+@@ -28,6 +28,10 @@
+ #define ATH79_IP3_IRQ_COUNT     3
+ #define ATH79_IP3_IRQ(_x)       (ATH79_IP3_IRQ_BASE + (_x))
+ 
++#define ATH79_GPIO_IRQ_BASE	(ATH79_IP3_IRQ_BASE + ATH79_IP3_IRQ_COUNT)
++#define ATH79_GPIO_IRQ_COUNT	30
++#define ATH79_GPIO_IRQ(_x)	(ATH79_GPIO_IRQ_BASE + (_x))
++
+ #define ATH79_CPU_IRQ_IP2	(MIPS_CPU_IRQ_BASE + 2)
+ #define ATH79_CPU_IRQ_IP3	(MIPS_CPU_IRQ_BASE + 3)
+ #define ATH79_CPU_IRQ_USB	ATH79_CPU_IRQ_IP3
